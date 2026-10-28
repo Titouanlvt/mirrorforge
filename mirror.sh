@@ -560,7 +560,9 @@ create_layout() {
     log "  ✔ Arborescence prête :"
     local _d
     for _d in debian debian-security pve pbs pdm ceph-*; do
-        [[ -d $MIRROR_ROOT/$_d ]] && log "      • $MIRROR_ROOT/$_d"
+        if [[ -d $MIRROR_ROOT/$_d ]]; then
+            log "      • $MIRROR_ROOT/$_d"
+        fi
     done
 }
 
@@ -775,7 +777,9 @@ run_group() {
             log "  Taille actuelle du miroir : $(du -sh "$MIRROR_ROOT" 2>/dev/null | awk '{print $1}') — restant : $((REPO_TOTAL - REPO_INDEX)) dépôt(s)."
             local remaining
             remaining=$(estimate_remaining)
-            [[ -n $remaining ]] && log "  ⏳ Temps restant estimé : $remaining (moyenne : $(human_duration $((ELAPSED_REPO_SECONDS / REPO_INDEX))) par dépôt, débit global : $(human_speed "$ELAPSED_REPO_MB" "$ELAPSED_REPO_SECONDS"))."
+            if [[ -n $remaining ]]; then
+                log "  ⏳ Temps restant estimé : $remaining (moyenne : $(human_duration $((ELAPSED_REPO_SECONDS / REPO_INDEX))) par dépôt, débit global : $(human_speed "$ELAPSED_REPO_MB" "$ELAPSED_REPO_SECONDS"))."
+            fi
         else
             log "✘ [$REPORT_NAME] ÉCHEC après ${REPORT_ATTEMPTS} tentative(s) — les autres dépôts continuent."
             failed=1
