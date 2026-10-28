@@ -179,7 +179,7 @@ install_deps() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq debmirror rsync gnupg debian-archive-keyring curl \
-        >/dev/null
+        e2fsprogs util-linux mount >/dev/null
     log "Dépendances OK (debmirror, rsync, gnupg, debian-archive-keyring, curl)."
 }
 
