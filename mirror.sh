@@ -17,6 +17,13 @@
 
 set -euo pipefail
 
+# PATH complet et déterministe : sur certaines installs minimales/VM, sudo
+# fournit un PATH restreint sans /usr/sbin ni /usr/local/bin — les binaires
+# système (mkfs.ext4, blkid, mount...) sembleraient alors « introuvables »
+# alors qu'ils sont installés. On force un PATH complet dès le départ.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 # =============================================================================
 # BLOC DE CONFIGURATION — tout est réglable ici, aucun fichier externe requis
 # =============================================================================
