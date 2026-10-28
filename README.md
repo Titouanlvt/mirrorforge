@@ -13,8 +13,8 @@ Debian 13 · Proxmox VE · Proxmox Backup · Datacenter Manager · Ceph
 [![ShellCheck](https://img.shields.io/badge/ShellCheck-0%20erreur-2ea44f?style=flat-square)](https://www.shellcheck.net)
 [![Licence](https://img.shields.io/badge/usage-libre-blue?style=flat-square)](#)
 
-*Le script ne formate rien, ne partitionne rien, n'efface rien.*
-*Il ne monte qu'un disque déjà formaté — et dépose les dépôts dessus.*
+*Par défaut, le script ne formate rien et ne touche qu'un disque déjà formaté.*
+*Pour un disque NEUF : une seule variable à activer (`FORMAT_DISK="yes"`) et il s'en occupe.*
 
 </div>
 
@@ -59,13 +59,13 @@ sudo ./mirror.sh unmount             # ⏏️  Démonte proprement le disque
 
 ## 🛡️ Ce que le script ne fait JAMAIS
 
-> **✋ Trois règles absolues, codées en dur :**
+> **✋ Règles de sécurité, codées en dur :**
 
-| ❌ Interdit | ✅ Comportement réel |
+| ❌ Jamais sans consentement explicite | ✅ Comportement réel |
 |---|---|
-| Formater / partitionner / effacer | Le script **ne touche jamais** à la table de partitions ni au filesystem |
-| Deviner entre plusieurs disques | Candidats de taille proche → **liste affichée + arrêt propre** |
-| Monter un disque sans filesystem reconnu | `blkid` ne reconnaît rien → **arrêt avec message clair** |
+| Formater par défaut | Le script ne formate **que** si `FORMAT_DISK="yes"` et uniquement un disque **vierge** (pas de fs, pas de partitions multiples, non monté, pas le disque système) |
+| Deviner entre plusieurs disques | Candidats (formatés **ou** vierges) de taille proche → **liste affichée + arrêt propre** |
+| Monter un disque sans filesystem reconnu | `blkid` ne reconnaît rien et `FORMAT_DISK="no"` → **arrêt avec message clair** |
 
 Et également :
 - 🚫 **Aucun serveur HTTP** — pas de nginx, pas d'apache
@@ -92,6 +92,7 @@ Tout se règle dans le **bloc de variables commenté en tête de `mirror.sh`** �
 | Variable | Rôle | Défaut |
 |---|---|---|
 | `DISK_UUID` | Figer le disque (vide = détection auto + mémorisation) | `""` |
+| `FORMAT_DISK` | Auto-formater un disque **neuf/vierge** en ext4 (`no` par défaut) | `no` |
 | `MOUNT_POINT` | Point de montage | `/mnt/miroir` |
 | `MIN_FREE_GB` | Marge d'espace libre exigée avant synchro | `50` |
 | `DEBIAN_SUITES` / `SECURITY_SUITES` | Suites Debian | `trixie…` |
@@ -121,7 +122,9 @@ DEBIAN_SUITES="trixie,trixie-updates,trixie-backports,forky"
 
 - [ ] Debian 13 (**trixie**), fraîchement installée
 - [ ] Accès **root** (le script se relance via `sudo` si besoin)
-- [ ] Un HDD de **≥ 2 To** (un miroir complet Debian + Proxmox + Ceph tient dans ~500 Go ; entre 2 et 3 To c'est confortable), branché, **déjà formaté** (ext4 ou autre fs reconnu par `blkid`), non monté
+- [ ] Un HDD de **≥ 2 To** (un miroir complet Debian + Proxmox + Ceph tient dans ~500 Go ; entre 2 et 3 To c'est confortable), branché, **non monté**
+  - Disque **déjà formaté** → rien à faire, le script le détecte
+  - Disque **neuf (vierge)** → mettez `FORMAT_DISK="yes"` en tête du script : il sera formaté automatiquement en ext4, sous conditions de sécurité
 - [ ] Une connexion Internet vers `deb.debian.org` · `security.debian.org` · `download.proxmox.com`
 
 > 💡 **Pas besoin de préparer le disque à la main** : détection automatique du plus grand disque libre, entrée `fstab` par UUID avec `nofail` ajoutée seule si absente.

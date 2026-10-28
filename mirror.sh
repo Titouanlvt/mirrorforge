@@ -36,6 +36,16 @@ MIRROR_ROOT="$MOUNT_POINT"
 # Marge d'espace libre minimale (en Go) exigée sur le disque avant toute synchro.
 MIN_FREE_GB="50"
 
+# AUTO-FORMATAGE d'un disque NEUF (vierge, sans filesystem) :
+#   "no"  (défaut, sûr) : si le disque détecté est vierge, le script s'arrête
+#         avec un message vous invitant à le formater vous-même.
+#   "yes" (pour disque neuf) : si le disque détecté est vierge ET qu'il passe
+#         toutes les vérifications de sécurité (pas le disque système, pas monté,
+#         pas de partitions), il est formaté automatiquement en ext4.
+# ATTENTION : formater efface IRRÉMÉDIABLEMENT le contenu du disque.
+# Ne mettez "yes" que pour un disque neuf que vous venez de brancher.
+FORMAT_DISK="yes"
+
 # Suites et sections Debian.
 DEBIAN_HOST="deb.debian.org"
 DEBIAN_ROOT="debian"
@@ -230,11 +240,19 @@ detect_disk() {
     done < <(lsblk -drbno NAME,SIZE 2>/dev/null | awk '$2 ~ /^[0-9]+$/')
 
     if [[ ${#candidates[@]} -eq 0 ]]; then
+        # FORMAT_DISK=yes : tente le formatage d'un disque neuf, sous conditions.
+        if [[ $FORMAT_DISK == "yes" ]]; then
+            format_new_disk
+            return
+        fi
         cat >&2 <<EOF
 ERREUR : aucun disque candidat trouvé.
 
-Il faut un disque (HDD) branché, DÉJÁ FORMATÉ (ext4 ou autre fs reconnu
+Il faut un disque (HDD) branché, DÉJÀ FORMATÉ (ext4 ou autre fs reconnu
 par blkid), qui ne soit ni le disque système ni déjà monté.
+
+Pour formater un disque NEUF, mettez FORMAT_DISK="yes" en tête du script,
+ou formatez-le vous-même :  mkfs.ext4 /dev/sdX
 
 Disques actuellement vus par le système :
 $(lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null)
@@ -275,6 +293,69 @@ EOF
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     echo "$DISK_UUID" >"$STATE_UUID_FILE" 2>/dev/null || true
     log "Disque détecté : $best_dev ($best_fs, UUID $DISK_UUID)"
+}
+
+# Formatage sécurisé d'un disque NEUF (appelé uniquement si FORMAT_DISK="yes").
+# Vérifications : pas le disque système, pas monté, pas de partitions, pas de
+# filesystem existant. En cas de doute sur plusieurs disques vierges, s'arrête.
+format_new_disk() {
+    local excluded name size_bytes dev count
+    local blanks=() sizes=()
+    excluded=$(system_disk_names)
+
+    while read -r name size_bytes; do
+        [[ -n $name ]] || continue
+        if [[ " $excluded " == *" $name "* ]]; then
+            continue
+        fi
+        local probe fstype
+        probe=$(probe_disk "$name" 2>/dev/null) || probe=""
+        [[ -n $probe ]] && continue
+        # Disque vierge = aucun fs sur le disque ni sur ses partitions.
+        fstype=$(blkid -s TYPE -o value "/dev/$name" 2>/dev/null || true)
+        [[ -n $fstype ]] && continue
+        count=$(lsblk -rno NAME,TYPE "/dev/$name" 2>/dev/null | awk '$2=="part"' | wc -l)
+        # Une partition sans fs peut exister sur un disque neuf : on l'effacera
+        # via mkfs sur le disque entier, mais on refuse les disques à plusieurs
+        # partitions (données potentielles ailleurs).
+        if (( count > 1 )); then
+            continue
+        fi
+        blanks+=("$name")
+        sizes+=("$size_bytes")
+    done < <(lsblk -drbno NAME,SIZE 2>/dev/null | awk '$2 ~ /^[0-9]+$/')
+
+    if [[ ${#blanks[@]} -eq 0 ]]; then
+        die "Aucun disque vierge éligible au formatage trouvé (FORMAT_DISK=yes)."
+    fi
+    if [[ ${#blanks[@]} -ge 2 ]]; then
+        if (( sizes[1] * 10 >= sizes[0] * 9 )); then
+            {
+                echo "ERREUR : plusieurs disques vierges de taille proche, je ne choisis pas à votre place."
+                echo ""
+                echo "Disques vierges détectés :"
+                local i
+                for i in "${!blanks[@]}"; do
+                    echo "  /dev/${blanks[$i]}  (${sizes[$i]} octets)"
+                done
+                echo ""
+                echo "Formatez manuellement le bon disque (mkfs.ext4 /dev/sdX),"
+                echo "ou fixez DISK_UUID après un formatage manuel."
+            } >&2
+            return 1
+        fi
+    fi
+
+    dev="/dev/${blanks[0]}"
+    log "Disque neuf détecté : $dev (${sizes[0]} octets) — formatage ext4 (FORMAT_DISK=yes)..."
+    log "ATTENTION : TOUT le contenu de $dev va être effacé."
+    wipefs -a "$dev" >/dev/null 2>&1 || true
+    mkfs.ext4 -F -L miroir "$dev"
+    DISK_UUID=$(blkid -s UUID -o value "$dev")
+    [[ -n $DISK_UUID ]] || die "Formatage effectué mais UUID illisible sur $dev."
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    echo "$DISK_UUID" >"$STATE_UUID_FILE" 2>/dev/null || true
+    log "Disque formaté : $dev (ext4, UUID $DISK_UUID)."
 }
 
 ensure_mounted() {
