@@ -384,8 +384,12 @@ format_new_disk() {
     log "ATTENTION : TOUT le contenu de $dev va être effacé."
     wipefs -a "$dev" >/dev/null 2>&1 || true
     mkfs.ext4 -F -L miroir "$dev"
-    DISK_UUID=$(blkid -s UUID -o value "$dev")
-    [[ -n $DISK_UUID ]] || die "Formatage effectué mais UUID illisible sur $dev."
+    # Attendre que udev/blkid voient le nouveau filesystem (fréquent en VM :
+    # le cache blkid renvoie l'ancienne entrée vide juste après mkfs).
+    udevadm settle 2>/dev/null || true
+    sleep 2
+    DISK_UUID=$(blkid -c /dev/null -s UUID -o value "$dev")
+    [[ -n $DISK_UUID ]] || die "Formatage effectué mais UUID illisible sur $dev (blkid ne voit pas le fs — redémarrez et relancez)."
     mkdir -p "$PERSIST_STATE_DIR" 2>/dev/null || true
     echo "$DISK_UUID" >"$STATE_UUID_FILE" 2>/dev/null || true
     log "Disque formaté : $dev (ext4, UUID $DISK_UUID)."
