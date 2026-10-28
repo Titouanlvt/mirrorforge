@@ -177,10 +177,26 @@ require_root() {
 install_deps() {
     log "[1/6] Vérification des dépendances..."
     export DEBIAN_FRONTEND=noninteractive
+    log "  → apt-get update..."
     apt-get update -qq
+    log "  → Installation des paquets : debmirror rsync gnupg debian-archive-keyring curl e2fsprogs util-linux mount"
     apt-get install -y -qq debmirror rsync gnupg debian-archive-keyring curl \
         e2fsprogs util-linux mount >/dev/null
-    log "Dépendances OK (debmirror, rsync, gnupg, debian-archive-keyring, curl)."
+    log "  ✔ Dépendances installées :"
+    log "      • debmirror (moteur de synchro)"
+    log "      • rsync (transfert incrémental)"
+    log "      • gnupg (vérification GPG)"
+    log "      • debian-archive-keyring (clés Debian)"
+    log "      • curl (téléchargement clé Proxmox)"
+    log "      • e2fsprogs (mkfs.ext4, wipefs)"
+    log "      • util-linux (blkid, lsblk, findmnt, flock, udevadm)"
+    log "      • mount (mount, umount)"
+    # Vérification que les binaires critiques sont bien là.
+    local bin
+    for bin in debmirror mkfs.ext4 blkid flock lsblk findmnt mountpoint curl; do
+        command -v "$bin" >/dev/null 2>&1 || die "Binaire $bin introuvable après installation."
+    done
+    log "  ✔ Tous les binaires critiques vérifiés."
 }
 
 # =============================================================================
@@ -397,14 +413,14 @@ format_new_disk() {
 
 ensure_mounted() {
     if mountpoint -q "$MOUNT_POINT"; then
-        log "Disque déjà monté sur $MOUNT_POINT."
+        log "  ✔ Disque déjà monté sur $MOUNT_POINT — rien à faire."
         return
     fi
     if [[ -z $DISK_UUID ]]; then
         # UUID mémorisé d'un lancement précédent ?
         if [[ -r $STATE_UUID_FILE ]]; then
             DISK_UUID=$(cat "$STATE_UUID_FILE")
-            log "UUID mémorisé réutilisé : $DISK_UUID"
+            log "  ✔ UUID mémorisé réutilisé : $DISK_UUID (fichier $STATE_UUID_FILE)"
         else
             detect_disk || exit 1
         fi
@@ -424,7 +440,7 @@ ensure_mounted() {
         log "Entrée fstab déjà présente pour UUID=$DISK_UUID."
     fi
     mount "$MOUNT_POINT" || die "Échec du montage de $MOUNT_POINT (voir dmesg)."
-    log "Disque monté sur $MOUNT_POINT."
+    log "  ✔ Disque monté sur $MOUNT_POINT ($(df -h "$MOUNT_POINT" | awk 'NR==2{print $2}') au total, $(df -h "$MOUNT_POINT" | awk 'NR==2{print $4}') libres)."
 }
 
 # =============================================================================
@@ -440,7 +456,11 @@ create_layout() {
         mkdir -p "$MIRROR_ROOT/ceph-$rel"
     done
     mkdir -p "$STATE_DIR"
-    log "Arborescence prête sous $MIRROR_ROOT."
+    log "  ✔ Arborescence prête :"
+    local _d
+    for _d in debian debian-security pve pbs pdm ceph-*; do
+        [[ -d $MIRROR_ROOT/$_d ]] && log "      • $MIRROR_ROOT/$_d"
+    done
 }
 
 # =============================================================================
@@ -572,14 +592,14 @@ sync_repo() {
     while ((attempt < MAX_RETRIES)); do
         attempt=$((attempt + 1))
         log "▶ [$name] tentative $attempt/$MAX_RETRIES — synchronisation en cours, patientez..."
-        log "  (débit et fichiers suivent dans le log : $log_capture)"
+        log "  (sortie debmirror en direct ci-dessous, aussi dans : $log_capture)"
         if GNUPGHOME="$MIRROR_ROOT/.gnupg-empty" debmirror "${DEBMIRROR_BASE_OPTS[@]}" \
             --host="$host" --root="$root" --dist="$suites" --section="$sections" \
-            "${extra[@]}" "$target" >>"$log_capture" 2>&1; then
+            "${extra[@]}" "$target" 2>&1 | tee -a "$log_capture"; then
             rc=0
             break
         fi
-        rc=$?
+        rc=${PIPESTATUS[0]}
         log "✘ [$name] échec de la tentative $attempt (code $rc)."
         if ((attempt < MAX_RETRIES)); then
             log "  nouvelle tentative dans ${delay}s (délai exponentiel)..."
