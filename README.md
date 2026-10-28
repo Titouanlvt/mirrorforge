@@ -121,7 +121,7 @@ DEBIAN_SUITES="trixie,trixie-updates,trixie-backports,forky"
 
 - [ ] Debian 13 (**trixie**), fraîchement installée
 - [ ] Accès **root** (le script se relance via `sudo` si besoin)
-- [ ] Un HDD **≥ 4 To**, branché, **déjà formaté** (ext4 ou autre fs reconnu par `blkid`), non monté
+- [ ] Un HDD de **≥ 2 To** (un miroir complet Debian + Proxmox + Ceph tient dans ~500 Go ; entre 2 et 3 To c'est confortable), branché, **déjà formaté** (ext4 ou autre fs reconnu par `blkid`), non monté
 - [ ] Une connexion Internet vers `deb.debian.org` · `security.debian.org` · `download.proxmox.com`
 
 > 💡 **Pas besoin de préparer le disque à la main** : détection automatique du plus grand disque libre, entrée `fstab` par UUID avec `nofail` ajoutée seule si absente.
