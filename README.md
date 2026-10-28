@@ -82,6 +82,6 @@ Ajoutez-la à `DEBIAN_SUITES` ou `SECURITY_SUITES` (ex. `DEBIAN_SUITES="trixie,t
 
 ```bash
 git init && git add mirror.sh README.md && git commit -m "Miroir APT Debian 13 + Proxmox + Ceph"
-git remote add origin git@github.com:Titouanlvt/scripts-bach.git
+git remote add origin git@github.com:Titouanlvt/mirrorforge.git
 git push -u origin main
 ```
