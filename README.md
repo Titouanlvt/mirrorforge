@@ -1,5 +1,3 @@
-<div align="center">
-
 # 🔷 mirrorforge
 
 **Un seul script Bash. Un HDD. Tous vos dépôts APT.**
@@ -15,8 +13,6 @@ Debian 13 · Proxmox VE · Proxmox Backup · Datacenter Manager · Ceph
 
 *Par défaut, le script ne formate rien et ne touche qu'un disque déjà formaté.*
 *Pour un disque NEUF : une seule variable à activer (`FORMAT_DISK="yes"`) et il s'en occupe.*
-
-</div>
 
 ---
 
@@ -145,10 +141,6 @@ sudo ./mirror.sh
 
 ---
 
-<div align="center">
-
 **mirrorforge** — miroir APT local, turnkey, sans risque.
 
 ⭐ Une étoile sur le dépôt si le script vous a servi !
-
-</div>
