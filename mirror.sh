@@ -152,6 +152,7 @@ Usage :
   sudo ./mirror.sh dry-run [debian|proxmox|ceph|all]
   sudo ./mirror.sh status                   espace utilisé + dernières synchros
   sudo ./mirror.sh unmount                  démonte le disque miroir
+  sudo ./mirror.sh doctor                   diagnostic complet de l'environnement
 EOF
     exit 2
 }
@@ -213,10 +214,27 @@ install_deps() {
     log "      • e2fsprogs (mkfs.ext4, wipefs)"
     log "      • util-linux (blkid, lsblk, findmnt, flock, udevadm)"
     log "      • mount (mount, umount)"
-    # Vérification que les binaires critiques sont bien là (chemin absolu).
-    local bin path_bin
-    for bin in debmirror blkid flock lsblk findmnt mountpoint curl; do
-        path_bin=$(resolve_bin "$bin") || die "Binaire $bin introuvable après installation (dpkg -L pour vérifier)."
+    # Vérification que les binaires critiques sont bien là (chemin absolu),
+    # avec auto-réparation : si un binaire manque, on réinstalle son paquet
+    # (--reinstall force la remise en place des fichiers, symlinks compris)
+    # puis on re-résout ; en dernier recours on affiche le contenu du paquet
+    # (dpkg -L) pour voir ce qui a réellement été installé et où.
+    local bin path_bin owner_pkg
+    for bin in debmirror blkid flock lsblk findmnt mountpoint curl wipefs; do
+        if ! path_bin=$(resolve_bin "$bin"); then
+            owner_pkg=$(dpkg -S "$bin" 2>/dev/null | head -1 | cut -d: -f1 || true)
+            [[ -n $owner_pkg ]] || owner_pkg="util-linux"
+            log "  ⚠ $bin introuvable — réinstallation forcée de $owner_pkg..."
+            apt-get install -y --reinstall "$owner_pkg" || true
+            hash -r 2>/dev/null || true
+            path_bin=$(resolve_bin "$bin") || {
+                log "  ✘ $bin TOUJOURS introuvable après réinstallation de $owner_pkg."
+                log "    Contenu du paquet (dpkg -L $owner_pkg) :"
+                dpkg -L "$owner_pkg" 2>/dev/null | grep -E "$bin|sbin" | head -10 | while read -r l; do log "      $l"; done
+                log "    PATH actuel : $PATH"
+                die "Impossible de trouver $bin — relancez avec ./mirror.sh doctor pour un diagnostic complet."
+            }
+        fi
         log "      ✔ $bin -> $path_bin"
     done
     # Le formateur ext4 : mkfs.ext4 OU son binaire réel mke2fs.
@@ -225,9 +243,61 @@ install_deps() {
         MKFS_EXT4=$(resolve_bin mke2fs || true)
         [[ -n $MKFS_EXT4 ]] && MKFS_EXT4="$MKFS_EXT4 -t ext4"
     fi
-    [[ -n $MKFS_EXT4 ]] || die "mkfs.ext4/mke2fs introuvable : le paquet e2fsprogs n'a pas dû s'installer — lancez « apt-get install e2fsprogs » et regardez l'erreur."
+    if [[ -z $MKFS_EXT4 ]]; then
+        log "  ⚠ mkfs.ext4/mke2fs introuvable — réinstallation forcée d'e2fsprogs..."
+        apt-get install -y --reinstall e2fsprogs || true
+        hash -r 2>/dev/null || true
+        MKFS_EXT4=$(resolve_bin mkfs.ext4 || true)
+        if [[ -z $MKFS_EXT4 ]]; then
+            MKFS_EXT4=$(resolve_bin mke2fs || true)
+            [[ -n $MKFS_EXT4 ]] && MKFS_EXT4="$MKFS_EXT4 -t ext4"
+        fi
+        if [[ -z $MKFS_EXT4 ]]; then
+            log "  ✘ formateur ext4 TOUJOURS introuvable. Contenu d'e2fsprogs :"
+            dpkg -L e2fsprogs 2>/dev/null | grep -E 'mkfs|mke2fs' | head -10 | while read -r l; do log "      $l"; done
+            log "    PATH actuel : $PATH"
+            die "Relancez avec ./mirror.sh doctor pour un diagnostic complet."
+        fi
+    fi
     log "      ✔ formateur ext4 -> $MKFS_EXT4"
     log "  ✔ Tous les binaires critiques vérifiés."
+}
+
+# Diagnostic complet de l'environnement : pour les « introuvable »
+# récurrents, sans deviner. Affiche OS, PATH, binaires résolus, paquets.
+cmd_doctor() {
+    log "=== mirror.sh doctor — diagnostic complet ==="
+    log ""
+    log "── Système ──"
+    log "  OS     : $(cat /etc/os-release 2>/dev/null | grep PRETTY | cut -d'"' -f2 || echo inconnu)"
+    log "  Kernel : $(uname -r)"
+    log "  User   : $(id)"
+    log "  PATH   : $PATH"
+    log ""
+    log "── Binaires critiques (résolution par chemin absolu) ──"
+    local bin resolved
+    for bin in debmirror blkid lsblk findmnt flock mountpoint curl wipefs mkfs.ext4 mke2fs mkswap udevadm; do
+        if resolved=$(resolve_bin "$bin"); then
+            log "  ✔ $bin -> $resolved"
+        else
+            log "  ✘ $bin -> INTROUVABLE"
+        fi
+    done
+    log ""
+    log "── Paquets requis ──"
+    local pkg status
+    for pkg in debmirror rsync gnupg debian-archive-keyring curl e2fsprogs util-linux mount; do
+        status=$(dpkg -l "$pkg" 2>/dev/null | awk '/^ii/{print "installé"; found=1} END{if(!found) print "ABSENT"}')
+        log "  $pkg : $status"
+    done
+    log ""
+    log "── Disques visibles ──"
+    lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null | while read -r l; do log "  $l"; done
+    log ""
+    log "── Swap actif ──"
+    awk 'NR>1{print "  " $1}' /proc/swaps 2>/dev/null || log "  aucun"
+    log ""
+    log "=== Fin du diagnostic — copiez cette sortie si vous demandez de l'aide ==="
 }
 
 # =============================================================================
@@ -823,6 +893,10 @@ main() {
     unmount)
         if [[ ${EUID:-$(id -u)} -ne 0 ]]; then exec sudo "$0" "$@"; fi
         cmd_unmount
+        ;;
+    doctor)
+        if [[ ${EUID:-$(id -u)} -ne 0 ]]; then exec sudo "$0" "$@"; fi
+        cmd_doctor
         ;;
     -h | --help | help) usage ;;
     *) usage ;;
