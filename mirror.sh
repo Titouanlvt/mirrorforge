@@ -24,6 +24,19 @@ set -euo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
+# Résolution robuste des binaires système : retourne le chemin absolu du
+# binaire, en cherchant dans le PATH puis dans les répertoires sbin classiques
+# (certains environnements restreints ne les exposent pas dans le PATH).
+resolve_bin() {
+    local b
+    for b in "$(command -v "$1" 2>/dev/null || true)" \
+        /usr/sbin/"$1" /sbin/"$1" /usr/bin/"$1" /bin/"$1" \
+        /usr/local/sbin/"$1" /usr/local/bin/"$1"; do
+        [[ -n $b && -x $b ]] && { echo "$b"; return 0; }
+    done
+    return 1
+}
+
 # =============================================================================
 # BLOC DE CONFIGURATION — tout est réglable ici, aucun fichier externe requis
 # =============================================================================
@@ -187,8 +200,10 @@ install_deps() {
     log "  → apt-get update..."
     apt-get update -qq
     log "  → Installation des paquets : debmirror rsync gnupg debian-archive-keyring curl e2fsprogs util-linux mount"
-    apt-get install -y -qq debmirror rsync gnupg debian-archive-keyring curl \
-        e2fsprogs util-linux mount >/dev/null
+    if ! apt-get install -y debmirror rsync gnupg debian-archive-keyring curl \
+        e2fsprogs util-linux mount; then
+        die "apt-get install a échoué — ci-dessus l'erreur réelle du gestionnaire de paquets."
+    fi
     log "  ✔ Dépendances installées :"
     log "      • debmirror (moteur de synchro)"
     log "      • rsync (transfert incrémental)"
@@ -198,11 +213,20 @@ install_deps() {
     log "      • e2fsprogs (mkfs.ext4, wipefs)"
     log "      • util-linux (blkid, lsblk, findmnt, flock, udevadm)"
     log "      • mount (mount, umount)"
-    # Vérification que les binaires critiques sont bien là.
-    local bin
-    for bin in debmirror mkfs.ext4 blkid flock lsblk findmnt mountpoint curl; do
-        command -v "$bin" >/dev/null 2>&1 || die "Binaire $bin introuvable après installation."
+    # Vérification que les binaires critiques sont bien là (chemin absolu).
+    local bin path_bin
+    for bin in debmirror blkid flock lsblk findmnt mountpoint curl; do
+        path_bin=$(resolve_bin "$bin") || die "Binaire $bin introuvable après installation (dpkg -L pour vérifier)."
+        log "      ✔ $bin -> $path_bin"
     done
+    # Le formateur ext4 : mkfs.ext4 OU son binaire réel mke2fs.
+    MKFS_EXT4=$(resolve_bin mkfs.ext4 || true)
+    if [[ -z $MKFS_EXT4 ]]; then
+        MKFS_EXT4=$(resolve_bin mke2fs || true)
+        [[ -n $MKFS_EXT4 ]] && MKFS_EXT4="$MKFS_EXT4 -t ext4"
+    fi
+    [[ -n $MKFS_EXT4 ]] || die "mkfs.ext4/mke2fs introuvable : le paquet e2fsprogs n'a pas dû s'installer — lancez « apt-get install e2fsprogs » et regardez l'erreur."
+    log "      ✔ formateur ext4 -> $MKFS_EXT4"
     log "  ✔ Tous les binaires critiques vérifiés."
 }
 
@@ -406,7 +430,7 @@ format_new_disk() {
     log "Disque neuf détecté : $dev (${sizes[0]} octets) — formatage ext4 (FORMAT_DISK=yes)..."
     log "ATTENTION : TOUT le contenu de $dev va être effacé."
     wipefs -a "$dev" >/dev/null 2>&1 || true
-    mkfs.ext4 -F -L miroir "$dev"
+    $MKFS_EXT4 -F -L miroir "$dev"
     # Attendre que udev/blkid voient le nouveau filesystem (fréquent en VM :
     # le cache blkid renvoie l'ancienne entrée vide juste après mkfs).
     udevadm settle 2>/dev/null || true
