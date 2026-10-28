@@ -693,14 +693,38 @@ sync_repo() {
     while ((attempt < MAX_RETRIES)); do
         attempt=$((attempt + 1))
         log "▶ [$name] tentative $attempt/$MAX_RETRIES — synchronisation en cours, patientez..."
-        log "  (sortie debmirror en direct ci-dessous, aussi dans : $log_capture)"
-        if GNUPGHOME="$MIRROR_ROOT/.gnupg-empty" debmirror "${DEBMIRROR_BASE_OPTS[@]}" \
-            --host="$host" --root="$root" --dist="$suites" --section="$sections" \
-            "${extra[@]}" "$target" 2>&1 | tee -a "$log_capture"; then
-            rc=0
+        log "  (sortie debmirror en direct ci-dessous ; aussi dans : $log_capture)"
+        # Lancement de debmirror en arrière-plan avec moniteur de progression :
+        # - stdbuf --output=L : line-buffering, sinon Perl bufferise et rien
+        #   ne s'affiche pendant des heures dans le pipe tee ;
+        # - un écho périodique (toutes les 60 s) du volume écrit et du débit
+        #   instantané du dépôt en cours.
+        (
+            GNUPGHOME="$MIRROR_ROOT/.gnupg-empty" stdbuf --output=L --error=L \
+                debmirror "${DEBMIRROR_BASE_OPTS[@]}" \
+                --host="$host" --root="$root" --dist="$suites" --section="$sections" \
+                "${extra[@]}" "$target" >>"$log_capture" 2>&1
+            echo $? >"$log_capture.rc"
+        ) &
+        local dm_pid=$!
+        local last_mb=0 cur_mb delta rate
+        while kill -0 "$dm_pid" 2>/dev/null; do
+            sleep 60
+            kill -0 "$dm_pid" 2>/dev/null || break
+            cur_mb=$(du -sm "$target" 2>/dev/null | awk '{print $1}')
+            cur_mb=${cur_mb:-0}
+            delta=$((cur_mb - last_mb))
+            rate=$((delta / 60))
+            printf '%s 💿 [%s] en cours : %s Mo écrits dans ce dépôt (+%s Mo/min ≈ %s Mo/s)\n' \
+                "$(date '+%H:%M:%S')" "$name" "$cur_mb" "$delta" "$rate"
+            last_mb=$cur_mb
+        done
+        wait "$dm_pid" 2>/dev/null || true
+        rc=$(cat "$log_capture.rc" 2>/dev/null || echo 1)
+        rm -f "$log_capture.rc"
+        if (( rc == 0 )); then
             break
         fi
-        rc=${PIPESTATUS[0]}
         log "✘ [$name] échec de la tentative $attempt (code $rc)."
         if ((attempt < MAX_RETRIES)); then
             log "  nouvelle tentative dans ${delay}s (délai exponentiel)..."
