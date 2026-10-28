@@ -101,9 +101,11 @@ VERSION="1.1.0"
 # Progression globale : dépôt courant / total des dépôts du run.
 REPO_INDEX=0
 REPO_TOTAL=0
+# Temps et volume cumulés des dépôts déjà traités (estimation restant + débit).
+ELAPSED_REPO_SECONDS=0
+ELAPSED_REPO_MB=0
 LOCK_FILE="/run/lock/mirror.sh.lock"
 FSTAB="/etc/fstab"
-STATE_UUID_FILE="$STATE_DIR/disk.uuid"
 LOG_FILE=""
 START_TS=$(date +%s)
 mkdir -p "$PERSIST_STATE_DIR" 2>/dev/null || true
@@ -516,6 +518,40 @@ human_size() {
     fi
 }
 
+# Formate une durée en secondes : "1h52m10s".
+human_duration() {
+    local s=$1 hh mm ss
+    hh=$((s / 3600)); mm=$(((s % 3600) / 60)); ss=$((s % 60))
+    if ((hh > 0)); then
+        echo "${hh}h${mm}m${ss}s"
+    elif ((mm > 0)); then
+        echo "${mm}m${ss}s"
+    else
+        echo "${ss}s"
+    fi
+}
+
+# Débit moyen : Mo / durée. Renvoie "-" si rien à télécharger.
+human_speed() {
+    local mb=$1 sec=$2
+    (( sec > 0 )) || { echo "-"; return; }
+    local mbps=$((mb / sec))
+    if ((mbps >= 1024)); then
+        echo "$((mbps / 1024)) Go/s"
+    else
+        echo "${mbps} Mo/s"
+    fi
+}
+
+# Estime le temps restant à partir de la durée moyenne des dépôts traités.
+estimate_remaining() {
+    (( REPO_INDEX > 0 )) || return 0
+    local avg remaining
+    avg=$((ELAPSED_REPO_SECONDS / REPO_INDEX))
+    remaining=$((avg * (REPO_TOTAL - REPO_INDEX)))
+    human_duration "$remaining"
+}
+
 # Synchro d'un dépôt avec retries exponentiels. Variables de rapport :
 # REPORT_NAME/REPORT_STATUS/REPORT_MB/REPORT_SEC/REPORT_ATTEMPTS.
 sync_repo() {
@@ -563,6 +599,8 @@ sync_repo() {
     REPORT_MB=$((after_mb - before_mb))
     if ((REPORT_MB < 0)); then REPORT_MB=0; fi
     REPORT_SEC=$((t1 - t0))
+    ELAPSED_REPO_SECONDS=$((ELAPSED_REPO_SECONDS + REPORT_SEC))
+    ELAPSED_REPO_MB=$((ELAPSED_REPO_MB + REPORT_MB))
     return 0 # le rapport final gère les échecs, on ne casse pas set -e
 }
 
@@ -584,8 +622,11 @@ run_group() {
         log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         sync_repo "$name" "$host" "$root" "$suites" "$sections" "$target" "$dry"
         if [[ $REPORT_STATUS == "OK" ]]; then
-            log "✔ [$REPORT_NAME] terminé — $(human_size "$REPORT_MB") ajoutés en ${REPORT_SEC}s (${REPORT_ATTEMPTS} tentative(s))."
+            log "✔ [$REPORT_NAME] terminé — $(human_size "$REPORT_MB") ajoutés en $(human_duration "$REPORT_SEC") (débit moyen : $(human_speed "$REPORT_MB" "$REPORT_SEC"))."
             log "  Taille actuelle du miroir : $(du -sh "$MIRROR_ROOT" 2>/dev/null | awk '{print $1}') — restant : $((REPO_TOTAL - REPO_INDEX)) dépôt(s)."
+            local remaining
+            remaining=$(estimate_remaining)
+            [[ -n $remaining ]] && log "  ⏳ Temps restant estimé : $remaining (moyenne : $(human_duration $((ELAPSED_REPO_SECONDS / REPO_INDEX))) par dépôt, débit global : $(human_speed "$ELAPSED_REPO_MB" "$ELAPSED_REPO_SECONDS"))."
         else
             log "✘ [$REPORT_NAME] ÉCHEC après ${REPORT_ATTEMPTS} tentative(s) — les autres dépôts continuent."
             failed=1
@@ -656,6 +697,8 @@ final_report() {
     if [[ ${#FAILED_REPOS[@]} -gt 0 ]]; then
         log "  Dépôts en échec : ${FAILED_REPOS[*]}"
     fi
+    log "  Temps sync      : $(human_duration "$ELAPSED_REPO_SECONDS")"
+    log "  Volume sync     : $(human_size "$ELAPSED_REPO_MB") — débit moyen : $(human_speed "$ELAPSED_REPO_MB" "$ELAPSED_REPO_SECONDS")"
     log "  Durée totale    : ${hh}h${mm}m${ss}s"
     log "  Espace utilisé  : $(du -sh "$MIRROR_ROOT" 2>/dev/null | awk '{print $1}') sur $MIRROR_ROOT"
     log "  Espace libre    : $(df -h "$MIRROR_ROOT" | awk 'NR==2{print $4}')"
