@@ -85,19 +85,28 @@ RETRY_DELAY="30"
 # Répertoire des logs (créé sur le disque miroir une fois monté).
 LOG_DIR="$MIRROR_ROOT/mirror-logs"
 
-# Répertoire d'état interne (dernières synchros, UUID mémorisé).
+# Répertoire d'état interne (dernières synchros) sur le disque miroir.
 STATE_DIR="$MIRROR_ROOT/.mirror-state"
+
+# Fichier d'état système (UUID mémorisé) : sur le filesystem RACINE, pas sur le
+# disque miroir, car il doit être lisible AVANT le montage à chaque lancement.
+PERSIST_STATE_DIR="/var/lib/mirror-sh"
+STATE_UUID_FILE="$PERSIST_STATE_DIR/disk.uuid"
 
 # =============================================================================
 # FIN DU BLOC DE CONFIGURATION
 # =============================================================================
 
-VERSION="1.0.0"
+VERSION="1.1.0"
+# Progression globale : dépôt courant / total des dépôts du run.
+REPO_INDEX=0
+REPO_TOTAL=0
 LOCK_FILE="/run/lock/mirror.sh.lock"
 FSTAB="/etc/fstab"
 STATE_UUID_FILE="$STATE_DIR/disk.uuid"
 LOG_FILE=""
 START_TS=$(date +%s)
+mkdir -p "$PERSIST_STATE_DIR" 2>/dev/null || true
 
 # Logger console + fichier. Le fichier n'est ouvert qu'après le montage du
 # disque (avance_log), avant : console uniquement.
@@ -176,15 +185,15 @@ install_deps() {
 # ÉTAPE 2 — détection et montage du disque
 # =============================================================================
 
-# Disques qui portent (directement ou via une partition) le système ou tout
-# point de montage actif : à exclure absolument.
+# Disques qui portent (directement ou via une partition) le système, tout point
+# de montage actif, du swap actif ou des périphériques LVM/crypté : à exclure
+# absolument (findmnt ne voit pas le swap, ni les volumes actifs).
 system_disk_names() {
-    local disks part
+    local disks part parent
     disks=""
     # Toutes les partitions montées -> leurs disques parents.
     while read -r part; do
         [[ -n $part ]] || continue
-        local parent
         parent=$(lsblk -no PKNAME "$part" 2>/dev/null || true)
         if [[ -n $parent ]]; then
             disks+=" $parent"
@@ -193,7 +202,23 @@ system_disk_names() {
             disks+=" $(basename "$part")"
         fi
     done < <(findmnt -rno SOURCE | grep '^/dev/' | sort -u)
+    # Swap actif -> disques parents.
+    while read -r part; do
+        [[ -n $part ]] || continue
+        parent=$(lsblk -no PKNAME "$part" 2>/dev/null || true)
+        [[ -n $parent ]] && disks+=" $parent"
+    done < <(awk 'NR>1{print $1}' /proc/swaps 2>/dev/null | grep '^/dev/' | sort -u)
     echo "$disks"
+}
+
+# Vrai si le disque est inutilisable pour un miroir : pseudo-périphériques
+# (loop, RAM, LVM/device-mapper, RAID logiciel), qui ne sont pas de vrais HDD.
+is_virtual_disk() {
+    local name="$1"
+    [[ $name =~ ^(loop|zram|dm-|md|nvme[0-9]+c) ]] && return 0
+    # Toute hiérarchie device-mapper (LVM, LUKS) : disque déjà employé.
+    lsblk -rno TYPE "/dev/$name" 2>/dev/null | grep -qE 'crypt|lvm|raid' && return 0
+    return 1
 }
 
 # Analyse un disque : renvoie "device fstype" si un fs unique utilisable,
@@ -230,6 +255,9 @@ detect_disk() {
     while read -r name size_bytes; do
         [[ -n $name ]] || continue
         if [[ " $excluded " == *" $name "* ]]; then
+            continue
+        fi
+        if is_virtual_disk "$name"; then
             continue
         fi
         local probe
@@ -290,7 +318,7 @@ EOF
     DISK_UUID=$(blkid -s UUID -o value "$best_dev")
     [[ -n $DISK_UUID ]] || die "Impossible de lire l'UUID de $best_dev."
 
-    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    mkdir -p "$PERSIST_STATE_DIR" 2>/dev/null || true
     echo "$DISK_UUID" >"$STATE_UUID_FILE" 2>/dev/null || true
     log "Disque détecté : $best_dev ($best_fs, UUID $DISK_UUID)"
 }
@@ -306,6 +334,9 @@ format_new_disk() {
     while read -r name size_bytes; do
         [[ -n $name ]] || continue
         if [[ " $excluded " == *" $name "* ]]; then
+            continue
+        fi
+        if is_virtual_disk "$name"; then
             continue
         fi
         local probe fstype
@@ -353,7 +384,7 @@ format_new_disk() {
     mkfs.ext4 -F -L miroir "$dev"
     DISK_UUID=$(blkid -s UUID -o value "$dev")
     [[ -n $DISK_UUID ]] || die "Formatage effectué mais UUID illisible sur $dev."
-    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    mkdir -p "$PERSIST_STATE_DIR" 2>/dev/null || true
     echo "$DISK_UUID" >"$STATE_UUID_FILE" 2>/dev/null || true
     log "Disque formaté : $dev (ext4, UUID $DISK_UUID)."
 }
@@ -500,7 +531,8 @@ sync_repo() {
 
     while ((attempt < MAX_RETRIES)); do
         attempt=$((attempt + 1))
-        log ">>> [$name] tentative $attempt/$MAX_RETRIES..."
+        log "▶ [$name] tentative $attempt/$MAX_RETRIES — synchronisation en cours, patientez..."
+        log "  (débit et fichiers suivent dans le log : $log_capture)"
         if GNUPGHOME="$MIRROR_ROOT/.gnupg-empty" debmirror "${DEBMIRROR_BASE_OPTS[@]}" \
             --host="$host" --root="$root" --dist="$suites" --section="$sections" \
             "${extra[@]}" "$target" >>"$log_capture" 2>&1; then
@@ -508,9 +540,9 @@ sync_repo() {
             break
         fi
         rc=$?
-        log ">>> [$name] échec de la tentative $attempt (code $rc)."
+        log "✘ [$name] échec de la tentative $attempt (code $rc)."
         if ((attempt < MAX_RETRIES)); then
-            log ">>> [$name] nouvelle tentative dans ${delay}s (délai exponentiel)..."
+            log "  nouvelle tentative dans ${delay}s (délai exponentiel)..."
             sleep "$delay"
             delay=$((delay * 2))
         fi
@@ -541,11 +573,21 @@ run_group() {
     while read -r line; do
         [[ -z $line ]] && continue
         IFS='|' read -r name host root suites sections target <<<"$line"
+        REPO_INDEX=$((REPO_INDEX + 1))
+        log ""
+        log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log "▶ DÉPÔT $REPO_INDEX/$REPO_TOTAL : $name"
+        log "   cible   : $target"
+        log "   source  : http://$host/$root"
+        log "   suites  : $suites"
+        log "   sections: $sections"
+        log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         sync_repo "$name" "$host" "$root" "$suites" "$sections" "$target" "$dry"
         if [[ $REPORT_STATUS == "OK" ]]; then
-            log ">>> [$REPORT_NAME] $REPORT_STATUS — $(human_size "$REPORT_MB") en ${REPORT_SEC}s (${REPORT_ATTEMPTS} tentative(s))."
+            log "✔ [$REPORT_NAME] terminé — $(human_size "$REPORT_MB") ajoutés en ${REPORT_SEC}s (${REPORT_ATTEMPTS} tentative(s))."
+            log "  Taille actuelle du miroir : $(du -sh "$MIRROR_ROOT" 2>/dev/null | awk '{print $1}') — restant : $((REPO_TOTAL - REPO_INDEX)) dépôt(s)."
         else
-            log ">>> [$REPORT_NAME] $REPORT_STATUS après ${REPORT_ATTEMPTS} tentative(s) — les autres dépôts continuent."
+            log "✘ [$REPORT_NAME] ÉCHEC après ${REPORT_ATTEMPTS} tentative(s) — les autres dépôts continuent."
             failed=1
             FAILED_REPOS+=("$REPORT_NAME")
         fi
@@ -561,20 +603,29 @@ log_capture="/tmp/mirror-debmirror-$$.log"
 
 cmd_bootstrap_and_sync() {
     local groups="${1:-all}" dry="${2:-false}"
-    log "=== mirror.sh v$VERSION — démarrage ($(date -Is)) ==="
+    log ""
+    log "═════════════════════════════════════════════════════════════════════════"
+    log "  mirror.sh v$VERSION — $(date -Is)"
+    log "  Mode : $([[ $dry == "true" ]] && echo "DRY-RUN (estimation, sans écriture)" || echo "SYNCHRONISATION COMPLÈTE")"
+    log "═════════════════════════════════════════════════════════════════════════"
+    log ""
+    log "[1/6] Vérification des dépendances..."
     install_deps
+    log "[2/6] Détection et montage du disque..."
     ensure_mounted
     init_log
     trap on_interrupt INT TERM
+    log "[3/6] Création de l'arborescence des dépôts..."
     create_layout
+    log "[4/6] Vérification de l'espace disque..."
     check_space
+    log "[5/6] Clés GPG..."
     setup_keys
     build_debmirror_opts
-    if [[ $dry == "true" ]]; then
-        log "[6/6] DRY-RUN : estimation sans écriture (les fichiers déjà présents ne sont pas retéléchargés)..."
-    else
-        log "[6/6] Synchronisation..."
-    fi
+    # Comptage des dépôts pour la progression.
+    REPO_TOTAL=$(repos_for_group "$groups" | wc -l)
+    REPO_INDEX=0
+    log "[6/6] Synchronisation — $REPO_TOTAL dépôt(s) à traiter."
     FAILED_REPOS=()
     local global_rc=0
     local g
@@ -592,24 +643,30 @@ cmd_bootstrap_and_sync() {
 final_report() {
     local dry="$1"
     local total=$(( $(date +%s) - START_TS ))
+    local hh=$((total / 3600)) mm=$(((total % 3600) / 60)) ss=$((total % 60))
+    local ok_count=$((REPO_TOTAL - ${#FAILED_REPOS[@]}))
     log ""
-    log "=================== RAPPORT FINAL ==================="
+    log "═════════════════════════════════════════════════════════════════════════"
+    log "  RAPPORT FINAL"
+    log "═════════════════════════════════════════════════════════════════════════"
     if [[ $dry == "true" ]]; then
-        log "Mode : DRY-RUN (aucun paquet téléchargé, estimation via métadonnées)."
+        log "  Mode            : DRY-RUN (aucun paquet téléchargé)"
     fi
-    if [[ ${#FAILED_REPOS[@]} -eq 0 ]]; then
-        log "Tous les dépôts : OK."
-    else
-        log "Dépôts en échec : ${FAILED_REPOS[*]}"
-    fi
-    log "Durée totale : $((total / 3600))h$(( (total % 3600) / 60 ))m$((total % 60))s"
-    log "Détail par dépôt (delta disque, dry-run excluant les métadonnées) : voir ci-dessus."
-    log "===================================================="
+    log "  Dépôts OK       : $ok_count/$REPO_TOTAL"
     if [[ ${#FAILED_REPOS[@]} -gt 0 ]]; then
-        log "Code de sortie : 1 (au moins un dépôt en échec — relancez la commande sync pour réessayer)."
-    else
-        log "Code de sortie : 0."
+        log "  Dépôts en échec : ${FAILED_REPOS[*]}"
     fi
+    log "  Durée totale    : ${hh}h${mm}m${ss}s"
+    log "  Espace utilisé  : $(du -sh "$MIRROR_ROOT" 2>/dev/null | awk '{print $1}') sur $MIRROR_ROOT"
+    log "  Espace libre    : $(df -h "$MIRROR_ROOT" | awk 'NR==2{print $4}')"
+    log "  Log détaillé    : $LOG_FILE"
+    log "═════════════════════════════════════════════════════════════════════════"
+    if [[ ${#FAILED_REPOS[@]} -gt 0 ]]; then
+        log "  Code de sortie : 1 — relancez « ./mirror.sh sync » pour réessayer les dépôts en échec."
+    else
+        log "  Code de sortie : 0 — tout est en ordre. Prochain sync : ./mirror.sh sync all"
+    fi
+    log "═════════════════════════════════════════════════════════════════════════"
 }
 
 cmd_status() {
