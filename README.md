@@ -200,6 +200,34 @@ L'import est **incrémental** (rsync) : seuls les fichiers nouveaux/modifiés so
 recopiés — les mises à jour suivantes sont rapides. `mirror-logs/` n'est jamais
 importé ; l'espace disque du serveur est vérifié avant la copie (marge 10 Go).
 
+### ❓ Pourquoi copier vers le disque externe (plutôt que sync directement dessus) ?
+
+- **Le miroir reste vivant sur le PC online** : `/mnt/miroir` peut se resynchroniser
+  à tout moment (`mirror.sh sync`), même quand le disque externe est absent ou
+  en transit. On ne copie vers le disque de transport **que pour préparer une
+  livraison**.
+- **Rôles nets** : mirror.sh élit « le plus grand disque non-système au fs
+  reconnu » comme disque miroir. Garder le disque externe en simple cible de
+  copie évite qu'il soit élu disque miroir par erreur.
+- **rsync rend la copie rapide** : le premier passage copie tout (~500 Go), les
+  suivants ne copient que les nouveaux paquets (quelques Go, quelques minutes).
+
+### ⚠️ Format du disque externe de transport
+
+Un miroir Debian contient des **symlinks** (`dists/stable → trixie`…) et des
+**hardlinks** (pool). Un disque externe formaté en **NTFS/exFAT** (format usine
+fréquent) **perd les liens → miroir cassé à l'arrivée**. Formatez le disque de
+transport en **ext4** avant la première copie :
+
+```bash
+sudo mkfs.ext4 -L transport /dev/sdX   # ⚠️ EFFACE le disque — vérifiez la lettre !
+```
+
+*Alternative* : si le disque externe est en ext4, vous pouvez aussi laisser
+mirror.sh synchroniser directement dessus (il sera élu disque miroir), puis le
+transporter — au prix d'un miroir qui ne se met à jour que disque branché.
+Les deux flux aboutissent au même `depot.sh import` côté serveur.
+
 Configuration en tête de `depot.sh` : `DISK_UUID`, `MOUNT_POINT`,
 `SERVE_ROOT`, `LISTEN_ADDR`, `LISTEN_PORT`, `CLIENT_SUBNETS`,
 `SERVICE_NAME`, `SERVED_REPOS`, `ALLOWED_FILESYSTEMS`.
