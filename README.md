@@ -76,10 +76,13 @@ Pour servir un LAN ensuite, ajoutez vous-même un serveur HTTP pointant sur `/mn
 set -euo pipefail · shellcheck-clean · idempotent
 ├── 🔒 flock          → pas de double exécution
 ├── 📝 logs horodatés → /mnt/miroir/mirror-logs/ + console avec progression
+├── 👁️ sortie visible  → la progression debmirror s'affiche en direct (console ET log)
 ├── 🔁 3 retries       → délai exponentiel par dépôt (30s → 60s → 120s)
 ├── 🧯 isolation      → l'échec d'un dépôt ne bloque PAS les suivants
 └── ⏸️  Ctrl+C         → interruption propre, reprise au relancement
 ```
+
+`status` est une commande de **lecture seule** : si le disque n'est pas monté, elle refuse poliment au lieu de déclencher un montage. Les filesystems acceptés pour le disque miroir sont limités à une liste blanche (`ALLOWED_FILESYSTEMS` : ext4, xfs, btrfs…) — une partition swap ou un volume LVM ne sera jamais élue.
 
 ## ⚙️ Configuration
 

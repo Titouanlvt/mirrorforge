@@ -56,6 +56,11 @@ MIRROR_ROOT="$MOUNT_POINT"
 # Marge d'espace libre minimale (en Go) exigée sur le disque avant toute synchro.
 MIN_FREE_GB="50"
 
+# FIX 2 : liste blanche des filesystems utilisables comme disque miroir.
+# Tout autre TYPE blkid (swap, LVM2_member, crypto_LUKS, raid_member...) est
+# rejeté — jamais élire une partition swap ou un PV comme disque miroir.
+ALLOWED_FILESYSTEMS="ext2 ext3 ext4 xfs btrfs f2fs exfat ntfs"
+
 # AUTO-FORMATAGE d'un disque NEUF (vierge, sans filesystem) :
 #   "no"  (défaut, sûr) : si le disque détecté est vierge, le script s'arrête
 #         avec un message vous invitant à le formater vous-même.
@@ -181,16 +186,9 @@ on_interrupt() {
     exit 130
 }
 
-# --- root / relance sudo ----------------------------------------------------
-require_root() {
-    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-        if command -v sudo >/dev/null 2>&1; then
-            log "Pas en root, relance via sudo..."
-            exec sudo "$0" "$@"
-        fi
-        die "Ce script doit être exécuté en root (sudo ./mirror.sh)."
-    fi
-}
+# FIX 8 : require_root() supprimé — c'était du code mort (jamais appelé,
+# main() faisait ses vérifications inline). Le relancement sudo est désormais
+# unifié en tête de main() pour TOUTES les commandes nécessitant root.
 
 # =============================================================================
 # ÉTAPE 1 — dépendances
@@ -340,23 +338,33 @@ is_virtual_disk() {
     return 1
 }
 
-# Analyse un disque : renvoie "device fstype" si un fs unique utilisable,
-# sinon une ligne vide.
+# FIX 2 : vrai si le TYPE blkid est dans la liste blanche ALLOWED_FILESYSTEMS.
+fs_allowed() {
+    local fstype="$1" fs
+    [[ -z $fstype ]] && return 1
+    for fs in $ALLOWED_FILESYSTEMS; do
+        [[ $fstype == "$fs" ]] && return 0
+    done
+    return 1
+}
+
+# Analyse un disque : renvoie "device fstype" si un fs unique utilisable
+# (liste blanche), sinon une ligne vide. swap, LVM2_member etc. sont rejetés.
 probe_disk() {
     local disk="/dev/$1" part count dev fstype
-    if fstype=$(blkid -s TYPE -o value "$disk" 2>/dev/null) && [[ -n $fstype ]]; then
+    if fstype=$(blkid -s TYPE -o value "$disk" 2>/dev/null) && fs_allowed "$fstype"; then
         echo "$disk $fstype"
         return
     fi
     # Pas de fs sur le disque entier : accepter uniquement le cas simple
-    # d'UNE SEULE partition porteuse d'un filesystem.
+    # d'UNE SEULE partition porteuse d'un filesystem autorisé.
     count=0
     while read -r dev; do
         count=$((count + 1))
     done < <(lsblk -rno NAME,TYPE "$disk" 2>/dev/null | awk '$2=="part"{print $1}')
     if [[ $count -eq 1 ]]; then
         part=$(lsblk -rno NAME,TYPE "$disk" | awk '$2=="part"{print "/dev/"$1; exit}')
-        if fstype=$(blkid -s TYPE -o value "$part" 2>/dev/null) && [[ -n $fstype ]]; then
+        if fstype=$(blkid -s TYPE -o value "$part" 2>/dev/null) && fs_allowed "$fstype"; then
             echo "$part $fstype"
             return
         fi
@@ -436,9 +444,9 @@ EOF
 
     DISK_UUID=$(blkid -s UUID -o value "$best_dev")
     [[ -n $DISK_UUID ]] || die "Impossible de lire l'UUID de $best_dev."
-
-    mkdir -p "$PERSIST_STATE_DIR" 2>/dev/null || true
-    echo "$DISK_UUID" >"$STATE_UUID_FILE" 2>/dev/null || true
+    # FIX 1 : la persistance de l'UUID se fait dans ensure_mounted(), APRÈS le
+    # montage réussi. Écrire ici (avant montage) rendait la mémorisation
+    # inopérante si le montage échouait, et créait un état mensonger.
     log "Disque détecté : $best_dev ($best_fs, UUID $DISK_UUID)"
 }
 
@@ -507,8 +515,7 @@ format_new_disk() {
     sleep 2
     DISK_UUID=$(blkid -c /dev/null -s UUID -o value "$dev")
     [[ -n $DISK_UUID ]] || die "Formatage effectué mais UUID illisible sur $dev (blkid ne voit pas le fs — redémarrez et relancez)."
-    mkdir -p "$PERSIST_STATE_DIR" 2>/dev/null || true
-    echo "$DISK_UUID" >"$STATE_UUID_FILE" 2>/dev/null || true
+    # FIX 1 : pas d'écriture d'état ici — voir ensure_mounted().
     log "Disque formaté : $dev (ext4, UUID $DISK_UUID)."
 }
 
@@ -534,13 +541,21 @@ ensure_mounted() {
     [[ -n $fstype ]] || die "Le disque $dev n'a pas de filesystem reconnu (blkid). Je ne formate rien — formatez-le puis relancez."
 
     mkdir -p "$MOUNT_POINT"
-    if ! grep -qsE "^[^#]*UUID=$DISK_UUID" "$FSTAB"; then
+    # FIX (point vérifié) : le grep doit matcher UUID ET point de montage —
+    # avant, une entrée fstab existante pour ce UUID vers un AUTRE point de
+    # montage était considérée comme présente, et mount échouait ensuite.
+    if ! grep -qsE "^[^#]*UUID=${DISK_UUID}[[:space:]]+${MOUNT_POINT}([[:space:]]|$)" "$FSTAB"; then
         echo "UUID=$DISK_UUID $MOUNT_POINT $fstype defaults,nofail 0 2" >>"$FSTAB"
         log "Entrée fstab ajoutée (UUID=$DISK_UUID, $MOUNT_POINT, $fstype, nofail)."
     else
-        log "Entrée fstab déjà présente pour UUID=$DISK_UUID."
+        log "Entrée fstab déjà présente pour UUID=$DISK_UUID sur $MOUNT_POINT."
     fi
     mount "$MOUNT_POINT" || die "Échec du montage de $MOUNT_POINT (voir dmesg)."
+    # FIX 1 : persistance de l'UUID uniquement APRÈS un montage réussi —
+    # ainsi l'état mémorisé correspond toujours à un disque réellement montable.
+    mkdir -p "$PERSIST_STATE_DIR"
+    printf '%s\n' "$DISK_UUID" >"$STATE_UUID_FILE"
+    log "  ✔ UUID mémorisé dans $STATE_UUID_FILE"
     log "  ✔ Disque monté sur $MOUNT_POINT ($(df -h "$MOUNT_POINT" | awk 'NR==2{print $2}') au total, $(df -h "$MOUNT_POINT" | awk 'NR==2{print $4}') libres)."
 }
 
@@ -549,10 +564,12 @@ ensure_mounted() {
 # =============================================================================
 create_layout() {
     log "[3/6] Création de l'arborescence des dépôts..."
-    mkdir -p "$MIRROR_ROOT/debian" "$MIRROR_ROOT/debian-security" \
-        "$MIRROR_ROOT/pve" "$MIRROR_ROOT/pbs" "$MIRROR_ROOT/pdm" \
-        "$MIRROR_ROOT/ceph-squid" "$MIRROR_ROOT/ceph-tentacle"
+    # FIX 5 : seuls les répertoires dérivés de la CONFIGURATION sont créés —
+    # plus aucun nom de release Ceph codé en dur (l'ancien code créait
+    # ceph-squid/ceph-tentacle en dur en plus de la boucle sur $CEPH_RELEASES).
     local rel
+    mkdir -p "$MIRROR_ROOT/debian" "$MIRROR_ROOT/debian-security" \
+        "$MIRROR_ROOT/pve" "$MIRROR_ROOT/pbs" "$MIRROR_ROOT/pdm"
     for rel in $CEPH_RELEASES; do
         mkdir -p "$MIRROR_ROOT/ceph-$rel"
     done
@@ -586,9 +603,22 @@ setup_keys() {
     [[ -r $DEBIAN_KEYRING ]] || die "Keyring Debian introuvable : $DEBIAN_KEYRING (installez debian-archive-keyring)."
     if [[ ! -r $PROXMOX_KEYRING ]]; then
         log "Téléchargement de la clé Proxmox (release-trixie)..."
-        curl -fsSL "$PROXMOX_KEY_URL" -o "$PROXMOX_KEYRING"
+        # FIX 4 : téléchargement atomique — dans un fichier temporaire, validé
+        # par gpg, déplacé (mv) seulement si tout est OK. Un téléchargement
+        # interrompu ne laisse plus de fichier tronqué pris pour une clé valide.
+        local tmp_key
+        tmp_key=$(mktemp /tmp/proxmox-key.XXXXXX)
+        if ! curl -fsSL "$PROXMOX_KEY_URL" -o "$tmp_key"; then
+            rm -f "$tmp_key"
+            die "Téléchargement de la clé Proxmox échoué ($PROXMOX_KEY_URL)."
+        fi
+        if ! gpg --no-default-keyring --keyring "$tmp_key" --list-keys >/dev/null 2>&1; then
+            rm -f "$tmp_key"
+            die "La clé téléchargée n'est pas un keyring GPG valide ($PROXMOX_KEY_URL)."
+        fi
+        mv -f "$tmp_key" "$PROXMOX_KEYRING"
     fi
-    [[ -r $PROXMOX_KEYRING ]] || die "Clé Proxmox introuvable après téléchargement ($PROXMOX_KEYRING)."
+    [[ -r $PROXMOX_KEYRING ]] || die "Clé Proxmox introuvable après installation ($PROXMOX_KEYRING)."
     log "Clés prêtes : Debian + Proxmox."
 }
 
@@ -695,35 +725,16 @@ sync_repo() {
     while ((attempt < MAX_RETRIES)); do
         attempt=$((attempt + 1))
         log "▶ [$name] tentative $attempt/$MAX_RETRIES — synchronisation en cours, patientez..."
-        log "  (sortie debmirror en direct ci-dessous ; aussi dans : $log_capture)"
-        # Lancement de debmirror en arrière-plan avec moniteur de progression :
-        # - stdbuf --output=L : line-buffering, sinon Perl bufferise et rien
-        #   ne s'affiche pendant des heures dans le pipe tee ;
-        # - un écho périodique (toutes les 60 s) du volume écrit et du débit
-        #   instantané du dépôt en cours.
-        (
-            GNUPGHOME="$MIRROR_ROOT/.gnupg-empty" stdbuf --output=L --error=L \
-                debmirror "${DEBMIRROR_BASE_OPTS[@]}" \
-                --host="$host" --root="$root" --dist="$suites" --section="$sections" \
-                "${extra[@]}" "$target" >>"$log_capture" 2>&1
-            echo $? >"$log_capture.rc"
-        ) &
-        local dm_pid=$!
-        local last_mb=0 cur_mb delta rate
-        while kill -0 "$dm_pid" 2>/dev/null; do
-            sleep 60
-            kill -0 "$dm_pid" 2>/dev/null || break
-            cur_mb=$(du -sm "$target" 2>/dev/null | awk '{print $1}')
-            cur_mb=${cur_mb:-0}
-            delta=$((cur_mb - last_mb))
-            rate=$((delta / 60))
-            printf '%s 💿 [%s] en cours : %s Mo écrits dans ce dépôt (+%s Mo/min ≈ %s Mo/s)\n' \
-                "$(date '+%H:%M:%S')" "$name" "$cur_mb" "$delta" "$rate"
-            last_mb=$cur_mb
-        done
-        wait "$dm_pid" 2>/dev/null || true
-        rc=$(cat "$log_capture.rc" 2>/dev/null || echo 1)
-        rm -f "$log_capture.rc"
+        # FIX 3 : plus de redirection vers un fichier /tmp — la sortie de
+        # debmirror (progression --progress et erreurs) passe désormais par le
+        # log global (init_log : tee console + fichier). L'utilisateur voit
+        # tout en direct, et les échecs sont diagnostiquables.
+        # NB : capture du code retour via « || rc=$? » — un « if cmd; then ...
+        # fi » sans else donnerait toujours rc=0 (statut du composé if).
+        rc=0
+        GNUPGHOME="$MIRROR_ROOT/.gnupg-empty" debmirror "${DEBMIRROR_BASE_OPTS[@]}" \
+            --host="$host" --root="$root" --dist="$suites" --section="$sections" \
+            "${extra[@]}" "$target" || rc=$?
         if (( rc == 0 )); then
             break
         fi
@@ -737,6 +748,12 @@ sync_repo() {
 
     t1=$(date +%s)
     after_mb=$(du -sm "$target" 2>/dev/null | awk '{print $1}')
+    # FIX (point vérifié) : en dry-run, debmirror télécharge quand même les
+    # métadonnées dans <cible>/.temp (comportement normal du manuel). On les
+    # nettoie pour ne pas encombrer le disque ni fausser les tailles affichées.
+    if [[ $dry == "true" ]]; then
+        rm -rf "$target/.temp"
+    fi
     REPORT_NAME="$name"
     REPORT_ATTEMPTS=$attempt
     if [[ $rc -eq 0 ]]; then
@@ -789,7 +806,8 @@ run_group() {
     return $failed
 }
 
-log_capture="/tmp/mirror-debmirror-$$.log"
+# FIX 3 : le mécanisme log_capture (/tmp) est supprimé — la sortie debmirror
+# transite par le log global (init_log). Plus de fichier temporaire à nettoyer.
 
 # =============================================================================
 # COMMANDES
@@ -797,6 +815,10 @@ log_capture="/tmp/mirror-debmirror-$$.log"
 
 cmd_bootstrap_and_sync() {
     local groups="${1:-all}" dry="${2:-false}"
+    # FIX 6 : trap posé DÈS LE DÉBUT — l'ancien code l'installait après
+    # install_deps/ensure_mounted, qui modifient /etc/fstab : un Ctrl+C pendant
+    # ces étapes tuait le script sans message ni arrêt propre.
+    trap on_interrupt INT TERM
     log ""
     log "═════════════════════════════════════════════════════════════════════════"
     log "  mirror.sh v$VERSION — $(date -Is)"
@@ -808,7 +830,6 @@ cmd_bootstrap_and_sync() {
     log "[2/6] Détection et montage du disque..."
     ensure_mounted
     init_log
-    trap on_interrupt INT TERM
     log "[3/6] Création de l'arborescence des dépôts..."
     create_layout
     log "[4/6] Vérification de l'espace disque..."
@@ -865,8 +886,15 @@ final_report() {
     log "═════════════════════════════════════════════════════════════════════════"
 }
 
+# FIX (point vérifié) : status est une commande de LECTURE — elle ne doit pas
+# muter le système (détection, écriture fstab, montage). Si le disque n'est
+# pas monté, elle refuse poliment au lieu de déclencher un bootstrap.
 cmd_status() {
-    ensure_mounted
+    if ! mountpoint -q "$MOUNT_POINT"; then
+        log "Le disque miroir n'est pas monté sur $MOUNT_POINT."
+        log "Lancez « sudo ./mirror.sh » (ou « sync ») pour le monter, puis réessayez."
+        return 1
+    fi
     local d f
     printf '%-18s %-12s %-22s %s\n' "DÉPÔT" "TAILLE" "DERNIÈRE SYNCHRO" "CHEMIN"
     for d in debian debian-security pve pbs pdm; do
@@ -900,8 +928,10 @@ cmd_unmount() {
 main() {
     local cmd="${1:-bootstrap}" arg="${2:-all}"
     case $cmd in
-    bootstrap | sync | dry-run)
-        # relance en root si nécessaire
+    bootstrap | sync | dry-run | status | unmount | doctor)
+        # FIX 8 : relancement sudo unifié en tête, pour TOUTES les commandes
+        # root (avant, status/unmount ne le faisaient qu'après acquire_lock,
+        # et chaque branche dupliquait le test).
         if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
             exec sudo "$0" "$@"
         fi
@@ -913,23 +943,13 @@ main() {
     bootstrap) cmd_bootstrap_and_sync "$arg" "false" ;;
     sync) cmd_bootstrap_and_sync "$arg" "false" ;;
     dry-run) cmd_bootstrap_and_sync "$arg" "true" ;;
-    status)
-        if [[ ${EUID:-$(id -u)} -ne 0 ]]; then exec sudo "$0" "$@"; fi
-        acquire_lock
-        cmd_status
-        ;;
-    unmount)
-        if [[ ${EUID:-$(id -u)} -ne 0 ]]; then exec sudo "$0" "$@"; fi
-        cmd_unmount
-        ;;
-    doctor)
-        if [[ ${EUID:-$(id -u)} -ne 0 ]]; then exec sudo "$0" "$@"; fi
-        cmd_doctor
-        ;;
+    # FIX 8 : plus de second acquire_lock ici (déjà fait ci-dessus).
+    status) cmd_status ;;
+    unmount) cmd_unmount ;;
+    doctor) cmd_doctor ;;
     -h | --help | help) usage ;;
     *) usage ;;
     esac
-    rm -f "$log_capture"
 }
 
 main "$@"
