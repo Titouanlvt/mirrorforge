@@ -208,6 +208,13 @@ ensure_mounted() {
         log "  ✔ Disque déjà monté sur $MOUNT_POINT."
         return
     fi
+    # Mode « miroir local » : le contenu a été livré par rsync/scp dans un
+    # répertoire du serveur (pas de disque à monter). On vérifie que c'est
+    # bien un miroir mirror.sh avant de le servir.
+    if [[ -d $MOUNT_POINT/debian || -d $MOUNT_POINT/.mirror-state ]]; then
+        log "  ✔ Miroir local présent dans $MOUNT_POINT (livré par rsync/scp) — pas de disque à monter."
+        return
+    fi
     if [[ -z $DISK_UUID ]]; then
         detect_mirror_disk
     fi
@@ -399,8 +406,9 @@ cmd_status() {
     else
         log "  ✘ ${SERVICE_NAME} INACTIF — lancez « sudo ./depot.sh setup »"
     fi
-    if ! mountpoint -q "$MOUNT_POINT"; then
-        log "  ✘ disque miroir non monté sur $MOUNT_POINT"
+    # Miroir présent ? (disque monté OU répertoire local livré par rsync/scp)
+    if ! mountpoint -q "$MOUNT_POINT" && [[ ! -d $MOUNT_POINT/debian && ! -d $MOUNT_POINT/.mirror-state ]]; then
+        log "  ✘ miroir introuvable sur $MOUNT_POINT (ni disque monté, ni contenu local)"
         return 1
     fi
     log ""

@@ -177,6 +177,22 @@ autorisé (ext4, xfs, btrfs…) qui **contient réellement un miroir mirror.sh**
 (vérifié par montage temporaire en lecture seule). Plusieurs candidats →
 refus avec liste. Le disque est monté en **lecture seule** (`ro`).
 
+**Deux façons d'alimenter le serveur** :
+- **Disque transporté** : le disque miroir est branché sur le serveur (montage ro automatique) ;
+- **Miroir livré par rsync/scp** (pas de disque externe) : le contenu est copié
+  dans un répertoire local du serveur (ex. `/var/miroir`), et `MOUNT_POINT`
+  pointe dessus — depot.sh le sert tel quel, sans montage :
+
+```bash
+# Sur la machine Debian (miroir à jour) — livraison INCRÉMENTALE par rsync :
+rsync -aH --delete --info=progress2 \
+    --exclude mirror-logs --exclude .mirror-state \
+    /mnt/miroir/ utilisateur@<ip-rhel>:/var/miroir/
+
+# Sur le serveur RHEL (MOUNT_POINT="/var/miroir" en tête de depot.sh) :
+sudo ./depot.sh setup && sudo ./depot.sh status
+```
+
 Configuration en tête de `depot.sh` : `DISK_UUID`, `MOUNT_POINT`,
 `SERVE_ROOT`, `LISTEN_ADDR`, `LISTEN_PORT`, `CLIENT_SUBNETS`,
 `SERVICE_NAME`, `SERVED_REPOS`, `ALLOWED_FILESYSTEMS`.
