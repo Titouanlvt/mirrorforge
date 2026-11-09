@@ -89,6 +89,8 @@ depot.sh v$VERSION — serveur de dépôt offline (RHEL 10) pour le disque mirro
 Usage :
   sudo ./depot.sh setup     monte le disque, crée le service, ouvre le pare-feu
   sudo ./depot.sh status    santé du service + dépôts servis
+  sudo ./depot.sh import <chemin>   copie le miroir d'un disque externe
+                                      de transport vers $MOUNT_POINT
   sudo ./depot.sh unmount   arrête le service et démonte tout
 EOF
     exit 2
@@ -431,6 +433,38 @@ cmd_status() {
     log "  Libre sur le disque : $(df -h "$MOUNT_POINT" | awk 'NR==2{print $4}')"
 }
 
+# Import du miroir depuis un disque externe de transport (copie INCRÉMENTALE
+# par rsync dans $MOUNT_POINT du serveur). Usage : depot.sh import <chemin>
+# où <chemin> = le répertoire du disque externe contenant le miroir
+# (ex. /run/media/admin/miroir).
+cmd_import() {
+    local src="$1"
+    if [[ -z $src ]]; then
+        die "Usage : sudo ./depot.sh import <chemin du disque externe> (ex. /run/media/admin/miroir)"
+    fi
+    [[ -d $src ]] || die "$src n'existe pas — le disque externe est-il monté ?"
+    # Le contenu source doit être un miroir mirror.sh.
+    if [[ ! -d $src/debian && ! -d $src/.mirror-state ]]; then
+        die "$src ne contient pas de miroir (ni debian/ ni .mirror-state/). Ce n'est pas une copie de mirror.sh — refus."
+    fi
+    mkdir -p "$MOUNT_POINT"
+    # Espace libre : marge de 10 Go en plus de la taille du miroir source.
+    local src_gb avail_gb
+    src_gb=$(du -sBG "$src" 2>/dev/null | awk '{gsub("G","",$1); print $1}')
+    avail_gb=$(df -BG --output=avail "$MOUNT_POINT" | tail -1 | tr -dc '0-9')
+    if (( avail_gb < src_gb + 10 )); then
+        die "Espace insuffisant sur $MOUNT_POINT : $avail_gb Go libres, il faut ~$((src_gb + 10)) Go (miroir $src_gb Go + marge 10 Go)."
+    fi
+    log "Import du miroir depuis $src vers $MOUNT_POINT (rsync incrémental)..."
+    log "  Seuls les fichiers nouveaux/modifiés seront copiés — les mises à jour suivantes seront rapides."
+    if ! rsync -aH --delete --info=progress2 --exclude mirror-logs \
+        "$src/" "$MOUNT_POINT/"; then
+        die "rsync a échoué — ci-dessus l'erreur réelle. L'état précédent de $MOUNT_POINT est préservé."
+    fi
+    log "  ✔ Import terminé : $(du -sh "$MOUNT_POINT" 2>/dev/null | awk '{print $1}') dans $MOUNT_POINT."
+    log "Prochaine étape : sudo ./depot.sh setup  (première fois) puis sudo ./depot.sh status."
+}
+
 cmd_unmount() {
     systemctl stop "${SERVICE_NAME}.service" 2>/dev/null || true
     local repo
@@ -449,7 +483,7 @@ cmd_unmount() {
 main() {
     local cmd="${1:-}"
     case $cmd in
-    setup | status | unmount)
+    setup | status | import | unmount)
         if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
             exec sudo "$0" "$@"
         fi
@@ -459,6 +493,7 @@ main() {
     case $cmd in
     setup) cmd_setup ;;
     status) cmd_status ;;
+    import) shift; cmd_import "${1:-}" ;;
     unmount) cmd_unmount ;;
     -h | --help | help | "") usage ;;
     *) usage ;;

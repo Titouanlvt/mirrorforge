@@ -179,19 +179,26 @@ refus avec liste. Le disque est monté en **lecture seule** (`ro`).
 
 **Deux façons d'alimenter le serveur** :
 - **Disque transporté** : le disque miroir est branché sur le serveur (montage ro automatique) ;
-- **Miroir livré par rsync/scp** (pas de disque externe) : le contenu est copié
-  dans un répertoire local du serveur (ex. `/var/miroir`), et `MOUNT_POINT`
-  pointe dessus — depot.sh le sert tel quel, sans montage :
+- **Import depuis un disque externe de transport** (flux recommandé sans disque dédié) :
+  le miroir est copié du PC online vers un disque externe, puis importé dans le
+  stockage du serveur :
 
 ```bash
-# Sur la machine Debian (miroir à jour) — livraison INCRÉMENTALE par rsync :
-rsync -aH --delete --info=progress2 \
-    --exclude mirror-logs --exclude .mirror-state \
-    /mnt/miroir/ utilisateur@<ip-rhel>:/var/miroir/
+# 1. Sur le PC ONLINE (Debian, après « sudo ./mirror.sh sync ») :
+#    copie du miroir vers le disque externe de transport :
+rsync -aH --delete --info=progress2 --exclude mirror-logs \
+    /mnt/miroir/ /media/$USER/<disque-ext>/miroir/
 
-# Sur le serveur RHEL (MOUNT_POINT="/var/miroir" en tête de depot.sh) :
-sudo ./depot.sh setup && sudo ./depot.sh status
+# 2. Transport du disque externe jusqu'au serveur, branchement (montage auto
+#    dans /run/media/<user>/<disque-ext>), puis sur le RHEL 10 :
+sudo ./depot.sh import /run/media/<user>/<disque-ext>/miroir
+sudo ./depot.sh setup     # première fois seulement (ensuite : status suffit)
+sudo ./depot.sh status
 ```
+
+L'import est **incrémental** (rsync) : seuls les fichiers nouveaux/modifiés sont
+recopiés — les mises à jour suivantes sont rapides. `mirror-logs/` n'est jamais
+importé ; l'espace disque du serveur est vérifié avant la copie (marge 10 Go).
 
 Configuration en tête de `depot.sh` : `DISK_UUID`, `MOUNT_POINT`,
 `SERVE_ROOT`, `LISTEN_ADDR`, `LISTEN_PORT`, `CLIENT_SUBNETS`,
