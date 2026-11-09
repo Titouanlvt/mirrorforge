@@ -147,6 +147,42 @@ sudo ./mirror.sh
 
 ---
 
+## 📡 Depot.sh — servir le miroir sur un serveur RedHat 10 offline
+
+Le 2ᵉ script du dépôt met en place le **serveur de dépôt** sur un RedHat
+Enterprise Linux 10 **sans Internet ni dépôt de paquets** :
+
+```bash
+sudo ./depot.sh setup    # monte le disque, crée le service, ouvre le pare-feu
+sudo ./depot.sh status    # santé : service, dépôts servis (HTTP 200), tailles
+sudo ./depot.sh unmount   # arrête le service et démonte tout
+```
+
+**Zéro installation** : si httpd (Apache) est déjà présent il est utilisé,
+sinon le serveur HTTP intégré de Python 3 (présent sur toute install RHEL 10,
+dnf en dépend) sert le miroir via une unit systemd **sandboxée**.
+
+**Sécurité** :
+- la racine servie (`/srv/miroir`) ne contient QUE les dépôts, en **lecture
+  seule** (bind-mounts) — jamais `mirror-logs/` ni `.mirror-state/` ;
+- unit systemd durcie : utilisateur jetable (`DynamicUser`), filesystem en
+  lecture seule (`ProtectSystem=strict`), aucune capability, syscalls filtrés ;
+- **firewalld** : le port n'est ouvert QUE vers les subnets/IP clients
+  (`CLIENT_SUBNETS` en tête de script) ;
+- intégrité de bout en bout : les clients vérifient les **signatures GPG** des
+  fichiers Release — un serveur compromis ne peut pas injecter de paquet.
+
+**Détection prudente du disque** : le script ne monte qu'un disque au fs
+autorisé (ext4, xfs, btrfs…) qui **contient réellement un miroir mirror.sh**
+(vérifié par montage temporaire en lecture seule). Plusieurs candidats →
+refus avec liste. Le disque est monté en **lecture seule** (`ro`).
+
+Configuration en tête de `depot.sh` : `DISK_UUID`, `MOUNT_POINT`,
+`SERVE_ROOT`, `LISTEN_ADDR`, `LISTEN_PORT`, `CLIENT_SUBNETS`,
+`SERVICE_NAME`, `SERVED_REPOS`, `ALLOWED_FILESYSTEMS`.
+
+---
+
 **mirrorforge** — miroir APT local, turnkey, sans risque.
 
 ⭐ Une étoile sur le dépôt si le script vous a servi !
