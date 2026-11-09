@@ -26,7 +26,7 @@ cd mirrorforge
 sudo ./mirror.sh
 ```
 
-Le script fait **tout, automatiquement, jusqu'au bout** : dépendances, détection du disque, montage, clés GPG, puis miroir complet des 7 dépôts. Le premier sync dure des heures — vous pouvez faire **Ctrl+C** et relancer plus tard, il reprendra où il s'était arrêté.
+Le script fait **tout, automatiquement, jusqu'au bout** : dépendances, détection du disque, montage, clés GPG, puis miroir complet des 8 dépôts. Le premier sync dure des heures — vous pouvez faire **Ctrl+C** et relancer plus tard, il reprendra où il s'était arrêté.
 
 ## 📦 Dépôts miroités
 
@@ -39,6 +39,7 @@ Le script fait **tout, automatiquement, jusqu'au bout** : dépendances, détecti
 | 🗂️ **Proxmox Datacenter Manager** | `pdm-no-subscription` | `pdm/` |
 | 🦑 **Ceph Squid** | `no-subscription` | `ceph-squid/` |
 | 🐙 **Ceph Tentacle** | `no-subscription` | `ceph-tentacle/` |
+| 🛡️ **OPNsense** | dépôt FreeBSD via **rsync** (paquets `.txz` pour `pkg`) | `opnsense/` |
 
 Tout atterrit sur `/mnt/miroir/`, arch `amd64`, sources `.deb-src` désactivées par défaut.
 
@@ -46,7 +47,7 @@ Tout atterrit sur `/mnt/miroir/`, arch `amd64`, sources `.deb-src` désactivées
 
 ```bash
 sudo ./mirror.sh                     # 🚀 Bootstrap complet + synchro de tout
-sudo ./mirror.sh sync [debian|proxmox|ceph|all]
+sudo ./mirror.sh sync [debian|proxmox|ceph|opnsense|all]
                                      # ♻️  Ressynchronise un groupe (sans refaire l'install)
 sudo ./mirror.sh dry-run [cible]     # 👀 Estime le téléchargement sans rien écrire
 sudo ./mirror.sh status              # 📊 Espace par dépôt + dernière synchro réussie
@@ -98,6 +99,7 @@ Tout se règle dans le **bloc de variables commenté en tête de `mirror.sh`** �
 | `DEBIAN_SECTIONS` | Sections Debian | main, contrib, non-free, non-free-firmware |
 | `PROXMOX_SUITE` | Suite des dépôts Proxmox | `trixie` |
 | `CEPH_RELEASES` | Releases Ceph miroitées | `squid tentacle` |
+| `OPNSENSE_RSYNC_URL` | Dépôt OPNsense par rsync (vide = groupe désactivé) | `rsync://mirror.opnsense.org/opnsense` |
 | `ARCHES` | Architectures | `amd64` |
 | `INCLUDE_SOURCES` | Inclure les `.deb-src` | `false` |
 | `MAX_RETRIES` / `RETRY_DELAY` | Tentatives et délai exponentiel | `3` / `30` |
@@ -139,7 +141,8 @@ sudo ./mirror.sh
    ├─ 4. Crée /mnt/miroir/{debian, debian-security, pve, pbs, pdm, ceph-*}
    ├─ 5. Vérifie l'espace libre (marge 50 Go)
    ├─ 6. Importe les clés GPG (Debian + Proxmox release-trixie)
-   └─ 7. debmirror × 7 dépôts, séquentiel, avec retries → rapport final
+   └─ 7. debmirror × 7 dépôts APT + rsync × 1 dépôt OPNsense,
+        séquentiel, avec retries → rapport final
 ```
 
 ---

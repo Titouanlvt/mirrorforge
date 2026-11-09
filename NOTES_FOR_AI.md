@@ -20,20 +20,25 @@ Ordre d'exécution du cas principal (`main` → `cmd_bootstrap_and_sync`) :
 3. `install_deps` — debmirror, rsync, gnupg, debian-archive-keyring, curl
 4. `ensure_mounted` — détection/montage du disque (voir § Disque)
 5. `init_log` — redirige stdout/stderr via `tee` vers le log sur le disque
-6. `create_layout` — arborescence des 7 dépôts
+6. `create_layout` — arborescence des dépôts (config-dérivée)
 7. `check_space` — marge libre ≥ `MIN_FREE_GB`
 8. `setup_keys` — keyring Debian (paquet) + clé Proxmox (téléchargée)
 9. `build_debmirror_opts` — tableau `DEBMIRROR_BASE_OPTS` (commun)
-10. `run_group` → boucle sur `repos_for_group` → `sync_repo` par dépôt
+10. `run_group` → boucle sur `repos_for_group` → `sync_repo` (APT) ou
+    `sync_rsync_repo` (sentinelle `RSYNC`, pour OPNsense) par dépôt
 11. `final_report` — statistiques + code de sortie
 
 ### Format des définitions de dépôts
 
 `repos_for_group` émet des lignes pipe-séparées :
 `nom|hôte|root|suites|sections|chemin_cible`
-Parsées par `run_group` via `IFS='|' read`. Ajouter un dépôt = ajouter une
-ligne + éventuellement le répertoire dans `create_layout` (les releases Ceph
-sont déjà bouclées automatiquement via `CEPH_RELEASES`).
+Parsées par `run_group` via `IFS='|' read`. Cas particulier : une ligne avec
+`hôte = RSYNC` est un dépôt non-APT (OPNsense) — `root` porte alors l'URL
+rsync complète et `run_group` appelle `sync_rsync_repo` au lieu de
+`sync_repo`. Ajouter un dépôt = ajouter une ligne + éventuellement le
+répertoire dans `create_layout` (les releases Ceph sont déjà bouclées
+automatiquement via `CEPH_RELEASES` ; le groupe opnsense est désactivé en
+laissant `OPNSENSE_RSYNC_URL` vide).
 
 ## Invariants critiques (NE JAMAIS CASSER)
 

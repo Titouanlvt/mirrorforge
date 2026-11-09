@@ -4,8 +4,8 @@
 #
 # Usage :
 #   sudo ./mirror.sh                 # bootstrap complet + synchro de tout
-#   sudo ./mirror.sh sync [debian|proxmox|ceph|all]
-#   sudo ./mirror.sh dry-run [debian|proxmox|ceph|all]
+#   sudo ./mirror.sh sync [debian|proxmox|ceph|opnsense|all]
+#   sudo ./mirror.sh dry-run [debian|proxmox|ceph|opnsense|all]
 #   sudo ./mirror.sh status          # espace utilisé + dernière synchro par dépôt
 #   sudo ./mirror.sh unmount         # démonte le disque miroir
 #
@@ -92,6 +92,11 @@ PDM_COMPONENT="pdm-no-subscription"
 CEPH_RELEASES="squid tentacle"
 CEPH_COMPONENT="no-subscription"
 
+# Dépôt OPNsense (pare-feu, basé FreeBSD — paquets .txz via pkg, PAS d'APT).
+# debmirror ne peut pas le gérer : la synchro se fait par rsync, méthode
+# officielle documentée par OPNsense. Laissez vide pour désactiver le groupe.
+OPNSENSE_RSYNC_URL="rsync://mirror.opnsense.org/opnsense"
+
 # Architectures à miroiter.
 ARCHES="amd64"
 
@@ -153,8 +158,8 @@ mirror.sh v$VERSION — miroir APT local Debian 13 / Proxmox / Ceph
 
 Usage :
   sudo ./mirror.sh                          bootstrap + synchro de tout
-  sudo ./mirror.sh sync [debian|proxmox|ceph|all]
-  sudo ./mirror.sh dry-run [debian|proxmox|ceph|all]
+  sudo ./mirror.sh sync [debian|proxmox|ceph|opnsense|all]
+  sudo ./mirror.sh dry-run [debian|proxmox|ceph|opnsense|all]
   sudo ./mirror.sh status                   espace utilisé + dernières synchros
   sudo ./mirror.sh unmount                  démonte le disque miroir
   sudo ./mirror.sh doctor                   diagnostic complet de l'environnement
@@ -573,10 +578,13 @@ create_layout() {
     for rel in $CEPH_RELEASES; do
         mkdir -p "$MIRROR_ROOT/ceph-$rel"
     done
+    if [[ -n $OPNSENSE_RSYNC_URL ]]; then
+        mkdir -p "$MIRROR_ROOT/opnsense"
+    fi
     mkdir -p "$STATE_DIR"
     log "  ✔ Arborescence prête :"
     local _d
-    for _d in debian debian-security pve pbs pdm ceph-*; do
+    for _d in debian debian-security pve pbs pdm opnsense ceph-*; do
         if [[ -d $MIRROR_ROOT/$_d ]]; then
             log "      • $MIRROR_ROOT/$_d"
         fi
@@ -657,12 +665,19 @@ repos_for_group() {
             echo "ceph-$rel|$PROXMOX_HOST|debian/ceph-$rel|$PROXMOX_SUITE|$CEPH_COMPONENT|$MIRROR_ROOT/ceph-$rel"
         done
         ;;
+    opnsense)
+        # Format sentinel : nom|RSYNC|url|||cible — interprété par run_group.
+        if [[ -n $OPNSENSE_RSYNC_URL ]]; then
+            echo "opnsense|RSYNC|$OPNSENSE_RSYNC_URL|||$MIRROR_ROOT/opnsense"
+        fi
+        ;;
     all)
         repos_for_group debian
         repos_for_group proxmox
         repos_for_group ceph
+        repos_for_group opnsense
         ;;
-    *) die "Groupe inconnu : '$1'. Attendu : debian|proxmox|ceph|all." ;;
+    *) die "Groupe inconnu : '$1'. Attendu : debian|proxmox|ceph|opnsense|all." ;;
     esac
 }
 
@@ -772,6 +787,56 @@ sync_repo() {
     return 0 # le rapport final gère les échecs, on ne casse pas set -e
 }
 
+# Synchro rsync d'un dépôt non-APT (OPNsense). Même contrat que sync_repo :
+# retries exponentiels, variables de rapport, jamais fatal pour set -e.
+# --delete-delay : ne supprime dans la cible qu'après un transfert réussi.
+sync_rsync_repo() {
+    local name="$1" url="$2" target="$3"
+    local dry="${4:-false}"
+    local attempt=0 delay=$RETRY_DELAY rc=0 before_mb after_mb t0 t1
+    local extra=()
+    if [[ $dry == "true" ]]; then
+        extra=(--dry-run)
+    fi
+    mkdir -p "$target"
+    before_mb=$(du -sm "$target" 2>/dev/null | awk '{print $1}')
+    t0=$(date +%s)
+    while ((attempt < MAX_RETRIES)); do
+        attempt=$((attempt + 1))
+        log "▶ [$name] tentative $attempt/$MAX_RETRIES — synchronisation rsync en cours, patientez..."
+        rc=0
+        rsync -aH --delete-delay --stats --timeout=600 "${extra[@]}" \
+            "$url/" "$target/" || rc=$?
+        if (( rc == 0 )); then
+            break
+        fi
+        log "✘ [$name] échec de la tentative $attempt (code $rc)."
+        if ((attempt < MAX_RETRIES)); then
+            log "  nouvelle tentative dans ${delay}s (délai exponentiel)..."
+            sleep "$delay"
+            delay=$((delay * 2))
+        fi
+    done
+    t1=$(date +%s)
+    after_mb=$(du -sm "$target" 2>/dev/null | awk '{print $1}')
+    REPORT_NAME="$name"
+    REPORT_ATTEMPTS=$attempt
+    if [[ $rc -eq 0 ]]; then
+        if [[ $dry != "true" ]]; then
+            date -Is >"$STATE_DIR/$name.lastsync"
+        fi
+        REPORT_STATUS="OK"
+    else
+        REPORT_STATUS="ÉCHEC (code $rc)"
+    fi
+    REPORT_MB=$((after_mb - before_mb))
+    if ((REPORT_MB < 0)); then REPORT_MB=0; fi
+    REPORT_SEC=$((t1 - t0))
+    ELAPSED_REPO_SECONDS=$((ELAPSED_REPO_SECONDS + REPORT_SEC))
+    ELAPSED_REPO_MB=$((ELAPSED_REPO_MB + REPORT_MB))
+    return 0
+}
+
 # Exécute un groupe de dépôts et imprime le rapport.
 run_group() {
     local group="$1" dry="$2" line
@@ -784,11 +849,19 @@ run_group() {
         log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         log "▶ DÉPÔT $REPO_INDEX/$REPO_TOTAL : $name"
         log "   cible   : $target"
-        log "   source  : http://$host/$root"
-        log "   suites  : $suites"
-        log "   sections: $sections"
+        if [[ $host == "RSYNC" ]]; then
+            log "   source  : $root (rsync)"
+        else
+            log "   source  : http://$host/$root"
+            log "   suites  : $suites"
+            log "   sections: $sections"
+        fi
         log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        sync_repo "$name" "$host" "$root" "$suites" "$sections" "$target" "$dry"
+        if [[ $host == "RSYNC" ]]; then
+            sync_rsync_repo "$name" "$root" "$target" "$dry"
+        else
+            sync_repo "$name" "$host" "$root" "$suites" "$sections" "$target" "$dry"
+        fi
         if [[ $REPORT_STATUS == "OK" ]]; then
             log "✔ [$REPORT_NAME] terminé — $(human_size "$REPORT_MB") ajoutés en $(human_duration "$REPORT_SEC") (débit moyen : $(human_speed "$REPORT_MB" "$REPORT_SEC"))."
             log "  Taille actuelle du miroir : $(du -sh "$MIRROR_ROOT" 2>/dev/null | awk '{print $1}') — restant : $((REPO_TOTAL - REPO_INDEX)) dépôt(s)."
@@ -845,7 +918,7 @@ cmd_bootstrap_and_sync() {
     local global_rc=0
     local g
     if [[ $groups == "all" ]]; then
-        for g in debian proxmox ceph; do
+        for g in debian proxmox ceph opnsense; do
             run_group "$g" "$dry" || global_rc=1
         done
     else
@@ -897,7 +970,7 @@ cmd_status() {
     fi
     local d f
     printf '%-18s %-12s %-22s %s\n' "DÉPÔT" "TAILLE" "DERNIÈRE SYNCHRO" "CHEMIN"
-    for d in debian debian-security pve pbs pdm; do
+    for d in debian debian-security pve pbs pdm opnsense; do
         f="$STATE_DIR/$d.lastsync"
         printf '%-18s %-12s %-22s %s\n' "$d" \
             "$(du -sh "$MIRROR_ROOT/$d" 2>/dev/null | awk '{print $1}' || echo '-') " \

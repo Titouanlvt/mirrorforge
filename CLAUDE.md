@@ -4,10 +4,11 @@ Guide pour travailler sur ce dépôt avec Claude Code.
 
 ## Le projet
 
-`mirror.sh` : script Bash unique et autonome qui miroite 7 dépôts APT
-(Debian 13 trixie, Debian security, Proxmox VE/PBS/PDM, Ceph Squid/Tentacle)
-sur un disque HDD local. Aucune dépendance externe au script ; toute la
-configuration est un bloc de variables en tête de `mirror.sh`.
+`mirror.sh` : script Bash unique et autonome qui miroite 8 dépôts
+(Debian 13 trixie, Debian security, Proxmox VE/PBS/PDM, Ceph Squid/Tentacle
+via debmirror ; OPNsense via rsync) sur un disque HDD local. Aucune
+dépendance externe au script ; toute la configuration est un bloc de
+variables en tête de `mirror.sh`.
 
 ## Commandes essentielles
 
